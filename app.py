@@ -62,20 +62,8 @@ DETAIL_HEADERS = [
 
 DETAIL_WIDTHS = [38, 28, 22, 24, 14, 22, 30, 25, 14, 60, 40]
 
-UNIQUE_FIELD_HEADERS = [
-    'Field Type',
-    'Field Role',
-    'Field Name',
-    'Source/Table',
-    'Used In',
-    'Formula',
-    'Raw Source Field'
-]
-
-UNIQUE_FIELD_WIDTHS = [22, 24, 30, 25, 14, 60, 40]
-
-TABLE_HEADERS = ['Source/Table']
-TABLE_WIDTHS = [35]
+AGG_HEADERS = ['Source/Table', 'Field Name']
+AGG_WIDTHS = [35, 35]
 
 
 def _fill(bg):
@@ -288,19 +276,7 @@ def detail_row_values(folder, fex_name, field_type, field_role, formula_step, mu
     ]
 
 
-def unique_field_row_values(field_type, field_role, field_name, source_table, used_in, formula, raw):
-    return [
-        field_type,
-        field_role,
-        field_name,
-        source_table,
-        used_in,
-        formula,
-        raw
-    ]
-
-
-def append_rows(ws_detail, parsed, folder, fex_name, unique_fields_set, table_names_set):
+def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
     row = ws_detail.max_row + 1
 
     source_name_set = parsed['source_name_set']
@@ -330,13 +306,8 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_fields_set, table_na
             _write_cell(ws_detail, row, col, val, bg, fg)
         row += 1
 
-        unique_key = tuple(unique_field_row_values(
-            field_type, field_role, field_name, source_table, used_in, formula, raw
-        ))
-        unique_fields_set.add(unique_key)
-
-        if source_table:
-            table_names_set.add(source_table)
+        if source_table and field_name:
+            unique_table_fields_set.add((source_table, field_name))
 
     source_names_only = {f['field'] for f in parsed['source_fields']}
 
@@ -391,27 +362,15 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_fields_set, table_na
         )
 
 
-def write_unique_fields_sheet(ws, unique_fields_set):
-    setup_sheet(ws, UNIQUE_FIELD_HEADERS, UNIQUE_FIELD_WIDTHS)
-    sorted_rows = sorted(unique_fields_set, key=lambda x: (
-        str(x[3]).lower(),  # source/table
-        str(x[2]).lower(),  # field name
-        str(x[0]).lower(),  # field type
-        str(x[4]).lower(),  # used in
-        str(x[5]).lower(),  # formula
-    ))
+def write_aggregated_sheet(ws, unique_table_fields_set):
+    setup_sheet(ws, AGG_HEADERS, AGG_WIDTHS)
 
-    for row_num, values in enumerate(sorted_rows, start=2):
-        field_type = values[0]
-        bg, fg = FIELD_TYPE_COLORS.get(field_type, ('FFFFFF', '000000'))
-        for col_num, val in enumerate(values, start=1):
-            _write_cell(ws, row_num, col_num, val, bg, fg)
-
-
-def write_table_names_sheet(ws, table_names_set):
-    setup_sheet(ws, TABLE_HEADERS, TABLE_WIDTHS)
-    for row_num, table_name in enumerate(sorted(table_names_set, key=lambda x: str(x).lower()), start=2):
+    for row_num, (table_name, field_name) in enumerate(
+        sorted(unique_table_fields_set, key=lambda x: (str(x[0]).lower(), str(x[1]).lower())),
+        start=2
+    ):
         _write_cell(ws, row_num, 1, table_name)
+        _write_cell(ws, row_num, 2, field_name)
 
 
 def read_uploaded_fex(uploaded_file):
@@ -434,33 +393,28 @@ def collect_fex_from_zip(uploaded_zip):
 def prepare_workbook(template_bytes):
     wb = load_workbook(BytesIO(template_bytes))
 
-    # Rename first sheet
     ws_detail = wb[wb.sheetnames[0]]
     ws_detail.title = 'Detailed Fields'
     setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
 
-    # ALWAYS create fresh Sheet2 & Sheet3
-    if 'Unique Fields' in wb.sheetnames:
-        wb.remove(wb['Unique Fields'])
-    if 'Tables' in wb.sheetnames:
-        wb.remove(wb['Tables'])
+    # remove old aggregate sheets if they exist
+    for sheet_name in ['Unique Fields', 'Tables', 'Unique Table Fields']:
+        if sheet_name in wb.sheetnames:
+            wb.remove(wb[sheet_name])
 
-    ws_unique = wb.create_sheet('Unique Fields')
-    ws_tables = wb.create_sheet('Tables')
-
-    setup_sheet(ws_unique, UNIQUE_FIELD_HEADERS, UNIQUE_FIELD_WIDTHS)
-    setup_sheet(ws_tables, TABLE_HEADERS, TABLE_WIDTHS)
+    # create single aggregate sheet
+    ws_agg = wb.create_sheet('Unique Table Fields')
+    setup_sheet(ws_agg, AGG_HEADERS, AGG_WIDTHS)
 
     ensure_legend(wb)
 
-    return wb, ws_detail, ws_unique, ws_tables
+    return wb, ws_detail, ws_agg
 
 
 def build_output_workbook(template_bytes, fex_items):
-    wb, ws_detail, ws_unique, ws_tables = prepare_workbook(template_bytes)
+    wb, ws_detail, ws_agg = prepare_workbook(template_bytes)
 
-    unique_fields_set = set()
-    table_names_set = set()
+    unique_table_fields_set = set()
     errors = []
 
     total = len(fex_items)
@@ -470,21 +424,20 @@ def build_output_workbook(template_bytes, fex_items):
     for idx, (folder, fex_name, content) in enumerate(fex_items, start=1):
         try:
             parsed = parse_fex(content)
-            append_rows(ws_detail, parsed, folder, fex_name, unique_fields_set, table_names_set)
+            append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set)
         except Exception as e:
             errors.append(f"{fex_name}: {e}")
 
         progress.progress(idx / total)
         status.text(f"Processing {idx} of {total}: {fex_name}")
 
-    write_unique_fields_sheet(ws_unique, unique_fields_set)
-    write_table_names_sheet(ws_tables, table_names_set)
+    write_aggregated_sheet(ws_agg, unique_table_fields_set)
 
     output = BytesIO()
     wb.save(output)
     output.seek(0)
 
-    return output, errors, len(unique_fields_set), len(table_names_set)
+    return output, errors, len(unique_table_fields_set)
 
 
 st.set_page_config(page_title="WebFOCUS FEX to Excel Mapper", layout="wide")
@@ -535,15 +488,14 @@ if st.button("Run Mapping", type="primary"):
                     st.error("No .fex files found inside the ZIP.")
                     st.stop()
 
-            output_stream, errors, unique_field_count, table_count = build_output_workbook(
+            output_stream, errors, unique_count = build_output_workbook(
                 template_file.getvalue(),
                 fex_items
             )
 
             st.success(
                 f"Completed. Processed {len(fex_items)} file(s). "
-                f"Sheet2 unique fields: {unique_field_count}. "
-                f"Sheet3 tables: {table_count}."
+                f"Unique table-field pairs in Sheet2: {unique_count}."
             )
 
             st.download_button(
