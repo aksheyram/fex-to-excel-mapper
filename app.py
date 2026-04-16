@@ -414,7 +414,13 @@ def build_output_workbook(template_bytes, fex_items):
 
 
 st.set_page_config(page_title="WebFOCUS FEX to Excel Mapper", layout="wide")
-st.title("WebFOCUS FEX to Excel Mapper")
+col1, col2 = st.columns([6, 1])
+
+with col1:
+    st.title("WebFOCUS FEX to Excel Mapper")
+
+with col2:
+    st.image("logo.png", width=120)
 
 st.markdown("Upload your template and either FEX files or a ZIP containing FEX files.")
 
