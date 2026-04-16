@@ -1,6 +1,5 @@
 import re
 import zipfile
-import tempfile
 from io import BytesIO
 from pathlib import Path
 from collections import Counter, defaultdict
@@ -47,7 +46,7 @@ FIELD_TYPE_COLORS = {
     'BY Field (Calculated)': COLORS['by_calc'],
 }
 
-HEADERS = [
+DETAIL_HEADERS = [
     'Folder',
     'Fex name',
     'Field Type',
@@ -61,7 +60,22 @@ HEADERS = [
     'Raw Source Field'
 ]
 
-COL_WIDTHS = [38, 28, 22, 24, 14, 22, 30, 25, 14, 60, 40]
+DETAIL_WIDTHS = [38, 28, 22, 24, 14, 22, 30, 25, 14, 60, 40]
+
+UNIQUE_FIELD_HEADERS = [
+    'Field Type',
+    'Field Role',
+    'Field Name',
+    'Source/Table',
+    'Used In',
+    'Formula',
+    'Raw Source Field'
+]
+
+UNIQUE_FIELD_WIDTHS = [22, 24, 30, 25, 14, 60, 40]
+
+TABLE_HEADERS = ['Source/Table']
+TABLE_WIDTHS = [35]
 
 
 def _fill(bg):
@@ -72,12 +86,20 @@ def _font(fg, bold=False):
     return Font(name='Arial', size=9, color=fg, bold=bold)
 
 
-def _wc(ws, row, col, val, bg, fg, bold=False):
+def _write_cell(ws, row, col, val, bg='FFFFFF', fg='000000', bold=False):
     c = ws.cell(row=row, column=col, value=val)
     c.fill = _fill(bg)
     c.font = _font(fg, bold)
     c.alignment = WRAP_TOP
     c.border = BORDER
+
+
+def setup_sheet(ws, headers, widths):
+    hbg, hfg = COLORS['header']
+    for col, (h, w) in enumerate(zip(headers, widths), 1):
+        _write_cell(ws, 1, col, h, hbg, hfg, bold=True)
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.row_dimensions[1].height = 22
 
 
 def raw_db_fields(formula, defined_names):
@@ -223,21 +245,6 @@ def parse_fex(fex_text):
     return result
 
 
-def ensure_header(ws):
-    hbg, hfg = COLORS['header']
-
-    for col, (h, w) in enumerate(zip(HEADERS, COL_WIDTHS), 1):
-        c = ws.cell(row=1, column=col)
-        c.value = h
-        c.fill = _fill(hbg)
-        c.font = Font(name='Arial', size=10, bold=True, color=hfg)
-        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        c.border = BORDER
-        ws.column_dimensions[get_column_letter(col)].width = w
-
-    ws.row_dimensions[1].height = 22
-
-
 def ensure_legend(wb):
     if 'Legend' in wb.sheetnames:
         return
@@ -264,10 +271,37 @@ def ensure_legend(wb):
     lg.column_dimensions['B'].width = 60
 
 
-def append_rows(ws, folder, fex_name, parsed):
-    row = ws.max_row + 1
-    if ws.max_row == 1 and all(ws.cell(2, c).value is None for c in range(1, len(HEADERS) + 1)):
-        row = 2
+def detail_row_values(folder, fex_name, field_type, field_role, formula_step, multiple_formula,
+                      field_name, source_table, used_in, formula, raw):
+    return [
+        folder,
+        fex_name,
+        field_type,
+        field_role,
+        formula_step,
+        multiple_formula,
+        field_name,
+        source_table,
+        used_in,
+        formula,
+        raw
+    ]
+
+
+def unique_field_row_values(field_type, field_role, field_name, source_table, used_in, formula, raw):
+    return [
+        field_type,
+        field_role,
+        field_name,
+        source_table,
+        used_in,
+        formula,
+        raw
+    ]
+
+
+def append_rows(ws_detail, parsed, folder, fex_name, unique_fields_set, table_names_set):
+    row = ws_detail.max_row + 1
 
     source_name_set = parsed['source_name_set']
     calculated_name_set = parsed['calculated_name_set']
@@ -279,7 +313,7 @@ def append_rows(ws, folder, fex_name, parsed):
             return 'Y' if calculated_counts[field_name] > 1 else 'N'
         return ''
 
-    def write_row(field_type, field_name, source_table, used_in, formula='', raw='', formula_step=''):
+    def add_detail_and_unique(field_type, field_name, source_table, used_in, formula='', raw='', formula_step=''):
         nonlocal row
 
         field_role = classify_field_role(field_name, source_name_set, calculated_name_set)
@@ -287,41 +321,36 @@ def append_rows(ws, folder, fex_name, parsed):
 
         bg, fg = FIELD_TYPE_COLORS.get(field_type, ('FFFFFF', '000000'))
 
-        values = [
-            folder,
-            fex_name,
-            field_type,
-            field_role,
-            formula_step,
-            multiple_formula,
-            field_name,
-            source_table,
-            used_in,
-            formula,
-            raw
-        ]
+        detail_values = detail_row_values(
+            folder, fex_name, field_type, field_role, formula_step, multiple_formula,
+            field_name, source_table, used_in, formula, raw
+        )
 
-        for col, val in enumerate(values, 1):
-            _wc(ws, row, col, val, bg, fg)
-
+        for col, val in enumerate(detail_values, 1):
+            _write_cell(ws_detail, row, col, val, bg, fg)
         row += 1
+
+        unique_key = tuple(unique_field_row_values(
+            field_type, field_role, field_name, source_table, used_in, formula, raw
+        ))
+        unique_fields_set.add(unique_key)
+
+        if source_table:
+            table_names_set.add(source_table)
 
     source_names_only = {f['field'] for f in parsed['source_fields']}
 
     for f in parsed['source_fields']:
-        write_row(
+        add_detail_and_unique(
             'Source Field (DB Column)',
             f['field'],
             f['source'],
-            'DB Source',
-            '',
-            '',
-            ''
+            'DB Source'
         )
 
     for f in parsed['define_fields']:
         step_counter[f['field']] += 1
-        write_row(
+        add_detail_and_unique(
             'Calculated - DEFINE',
             f['field'],
             f['source'],
@@ -333,7 +362,7 @@ def append_rows(ws, folder, fex_name, parsed):
 
     for f in parsed['compute_fields']:
         step_counter[f['field']] += 1
-        write_row(
+        add_detail_and_unique(
             'Calculated - COMPUTE',
             f['field'],
             f['source'],
@@ -346,26 +375,43 @@ def append_rows(ws, folder, fex_name, parsed):
     for f in parsed['by_real']:
         if f['field'] in source_names_only:
             continue
-        write_row(
+        add_detail_and_unique(
             'BY Field (Real)',
             f['field'],
             f['source'],
-            'BY',
-            '',
-            '',
-            ''
+            'BY'
         )
 
     for f in parsed['by_calc']:
-        write_row(
+        add_detail_and_unique(
             'BY Field (Calculated)',
             f['field'],
             f['source'],
-            'BY',
-            '',
-            '',
-            ''
+            'BY'
         )
+
+
+def write_unique_fields_sheet(ws, unique_fields_set):
+    setup_sheet(ws, UNIQUE_FIELD_HEADERS, UNIQUE_FIELD_WIDTHS)
+    sorted_rows = sorted(unique_fields_set, key=lambda x: (
+        str(x[3]).lower(),  # source/table
+        str(x[2]).lower(),  # field name
+        str(x[0]).lower(),  # field type
+        str(x[4]).lower(),  # used in
+        str(x[5]).lower(),  # formula
+    ))
+
+    for row_num, values in enumerate(sorted_rows, start=2):
+        field_type = values[0]
+        bg, fg = FIELD_TYPE_COLORS.get(field_type, ('FFFFFF', '000000'))
+        for col_num, val in enumerate(values, start=1):
+            _write_cell(ws, row_num, col_num, val, bg, fg)
+
+
+def write_table_names_sheet(ws, table_names_set):
+    setup_sheet(ws, TABLE_HEADERS, TABLE_WIDTHS)
+    for row_num, table_name in enumerate(sorted(table_names_set, key=lambda x: str(x).lower()), start=2):
+        _write_cell(ws, row_num, 1, table_name)
 
 
 def read_uploaded_fex(uploaded_file):
@@ -385,13 +431,42 @@ def collect_fex_from_zip(uploaded_zip):
     return files
 
 
-def build_output_workbook(template_bytes, fex_items):
+def prepare_workbook(template_bytes):
     wb = load_workbook(BytesIO(template_bytes))
-    ws = wb.active
-    ensure_header(ws)
+
+    ws_detail = wb[wb.sheetnames[0]]
+    ws_detail.title = 'Detailed Fields'
+    setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
+
+    if len(wb.sheetnames) >= 2:
+        ws_unique = wb[wb.sheetnames[1]]
+        ws_unique.title = 'Unique Fields'
+    else:
+        ws_unique = wb.create_sheet('Unique Fields')
+
+    if len(wb.sheetnames) >= 3:
+        ws_tables = wb[wb.sheetnames[2]]
+        ws_tables.title = 'Tables'
+    else:
+        ws_tables = wb.create_sheet('Tables')
+
+    for extra_name in wb.sheetnames[3:]:
+        pass
+
+    setup_sheet(ws_unique, UNIQUE_FIELD_HEADERS, UNIQUE_FIELD_WIDTHS)
+    setup_sheet(ws_tables, TABLE_HEADERS, TABLE_WIDTHS)
     ensure_legend(wb)
 
+    return wb, ws_detail, ws_unique, ws_tables
+
+
+def build_output_workbook(template_bytes, fex_items):
+    wb, ws_detail, ws_unique, ws_tables = prepare_workbook(template_bytes)
+
+    unique_fields_set = set()
+    table_names_set = set()
     errors = []
+
     total = len(fex_items)
     progress = st.progress(0)
     status = st.empty()
@@ -399,28 +474,25 @@ def build_output_workbook(template_bytes, fex_items):
     for idx, (folder, fex_name, content) in enumerate(fex_items, start=1):
         try:
             parsed = parse_fex(content)
-            append_rows(ws, folder, fex_name, parsed)
+            append_rows(ws_detail, parsed, folder, fex_name, unique_fields_set, table_names_set)
         except Exception as e:
             errors.append(f"{fex_name}: {e}")
 
         progress.progress(idx / total)
         status.text(f"Processing {idx} of {total}: {fex_name}")
 
+    write_unique_fields_sheet(ws_unique, unique_fields_set)
+    write_table_names_sheet(ws_tables, table_names_set)
+
     output = BytesIO()
     wb.save(output)
     output.seek(0)
 
-    return output, errors
+    return output, errors, len(unique_fields_set), len(table_names_set)
 
 
 st.set_page_config(page_title="WebFOCUS FEX to Excel Mapper", layout="wide")
-col1, col2 = st.columns([6, 1])
-
-with col1:
-    st.title("WebFOCUS FEX to Excel Mapper")
-
-with col2:
-    st.image("logo.png", width=120)
+st.title("WebFOCUS FEX to Excel Mapper")
 
 st.markdown("Upload your template and either FEX files or a ZIP containing FEX files.")
 
@@ -467,9 +539,16 @@ if st.button("Run Mapping", type="primary"):
                     st.error("No .fex files found inside the ZIP.")
                     st.stop()
 
-            output_stream, errors = build_output_workbook(template_file.getvalue(), fex_items)
+            output_stream, errors, unique_field_count, table_count = build_output_workbook(
+                template_file.getvalue(),
+                fex_items
+            )
 
-            st.success(f"Completed. Processed {len(fex_items)} file(s).")
+            st.success(
+                f"Completed. Processed {len(fex_items)} file(s). "
+                f"Sheet2 unique fields: {unique_field_count}. "
+                f"Sheet3 tables: {table_count}."
+            )
 
             st.download_button(
                 label="Download Output Excel",
