@@ -116,6 +116,26 @@ def classify_field_role(field_name, source_name_set, calculated_name_set):
     return ''
 
 
+def is_real_source_table(table_name):
+    if not table_name:
+        return False
+
+    t = str(table_name).strip().upper()
+
+    if not t:
+        return False
+
+    # exclude variable / hold style names
+    if t.startswith('&'):
+        return False
+    if t.startswith('HOLD'):
+        return False
+    if 'HOLD' in t:
+        return False
+
+    return True
+
+
 def parse_fex(fex_text):
     text = strip_comments(fex_text)
 
@@ -233,32 +253,6 @@ def parse_fex(fex_text):
     return result
 
 
-def ensure_legend(wb):
-    if 'Legend' in wb.sheetnames:
-        return
-
-    lg = wb.create_sheet('Legend')
-    lg['A1'] = 'Color Legend'
-    lg['A1'].font = Font(name='Arial', bold=True, size=11)
-
-    items = [
-        ('Source Field (DB Column)', COLORS['source'], 'Actual database columns from the source system'),
-        ('Calculated - DEFINE', COLORS['define'], 'Fields derived in DEFINE FILE block'),
-        ('Calculated - COMPUTE', COLORS['compute'], 'Fields computed inline inside TABLE block'),
-        ('BY Field (Real)', COLORS['by_real'], 'Real DB column used as BY'),
-        ('BY Field (Calculated)', COLORS['by_calc'], 'Calculated field used as BY'),
-    ]
-
-    for i, (label, (bg, fg), desc) in enumerate(items, 3):
-        c = lg.cell(row=i, column=1, value=label)
-        c.fill = _fill(bg)
-        c.font = Font(name='Arial', size=9, color=fg, bold=True)
-        lg.cell(row=i, column=2, value=desc).font = Font(name='Arial', size=9)
-
-    lg.column_dimensions['A'].width = 30
-    lg.column_dimensions['B'].width = 60
-
-
 def detail_row_values(folder, fex_name, field_type, field_role, formula_step, multiple_formula,
                       field_name, source_table, used_in, formula, raw):
     return [
@@ -306,7 +300,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
             _write_cell(ws_detail, row, col, val, bg, fg)
         row += 1
 
-        if source_table and field_name:
+        if is_real_source_table(source_table) and field_name:
             unique_table_fields_set.add((source_table, field_name))
 
     source_names_only = {f['field'] for f in parsed['source_fields']}
@@ -362,15 +356,21 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
         )
 
 
-def write_aggregated_sheet(ws, unique_table_fields_set):
-    setup_sheet(ws, AGG_HEADERS, AGG_WIDTHS)
+def write_aggregated_section(ws, unique_table_fields_set):
+    start_row = ws.max_row + 3
 
-    for row_num, (table_name, field_name) in enumerate(
-        sorted(unique_table_fields_set, key=lambda x: (str(x[0]).lower(), str(x[1]).lower())),
-        start=2
-    ):
-        _write_cell(ws, row_num, 1, table_name)
-        _write_cell(ws, row_num, 2, field_name)
+    _write_cell(ws, start_row, 1, 'Source/Table', COLORS['header'][0], COLORS['header'][1], bold=True)
+    _write_cell(ws, start_row, 2, 'Field Name', COLORS['header'][0], COLORS['header'][1], bold=True)
+
+    ws.column_dimensions[get_column_letter(1)].width = max(ws.column_dimensions[get_column_letter(1)].width, 35)
+    ws.column_dimensions[get_column_letter(2)].width = max(ws.column_dimensions[get_column_letter(2)].width, 35)
+
+    agg_row = start_row + 1
+
+    for table_name, field_name in sorted(unique_table_fields_set, key=lambda x: (str(x[0]).lower(), str(x[1]).lower())):
+        _write_cell(ws, agg_row, 1, table_name)
+        _write_cell(ws, agg_row, 2, field_name)
+        agg_row += 1
 
 
 def read_uploaded_fex(uploaded_file):
@@ -393,26 +393,25 @@ def collect_fex_from_zip(uploaded_zip):
 def prepare_workbook(template_bytes):
     wb = load_workbook(BytesIO(template_bytes))
 
+    # Remove Legend if present
+    if 'Legend' in wb.sheetnames:
+        wb.remove(wb['Legend'])
+
     ws_detail = wb[wb.sheetnames[0]]
-    ws_detail.title = 'Detailed Fields'
-    setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
+    ws_detail.title = 'Sheet1'
 
-    # remove old aggregate sheets if they exist
-    for sheet_name in ['Unique Fields', 'Tables', 'Unique Table Fields']:
-        if sheet_name in wb.sheetnames:
-            wb.remove(wb[sheet_name])
+    # rewrite header row
+    hbg, hfg = COLORS['header']
+    for col, (h, w) in enumerate(zip(DETAIL_HEADERS, DETAIL_WIDTHS), 1):
+        _write_cell(ws_detail, 1, col, h, hbg, hfg, bold=True)
+        ws_detail.column_dimensions[get_column_letter(col)].width = w
+    ws_detail.row_dimensions[1].height = 22
 
-    # create single aggregate sheet
-    ws_agg = wb.create_sheet('Unique Table Fields')
-    setup_sheet(ws_agg, AGG_HEADERS, AGG_WIDTHS)
-
-    ensure_legend(wb)
-
-    return wb, ws_detail, ws_agg
+    return wb, ws_detail
 
 
 def build_output_workbook(template_bytes, fex_items):
-    wb, ws_detail, ws_agg = prepare_workbook(template_bytes)
+    wb, ws_detail = prepare_workbook(template_bytes)
 
     unique_table_fields_set = set()
     errors = []
@@ -431,7 +430,7 @@ def build_output_workbook(template_bytes, fex_items):
         progress.progress(idx / total)
         status.text(f"Processing {idx} of {total}: {fex_name}")
 
-    write_aggregated_sheet(ws_agg, unique_table_fields_set)
+    write_aggregated_section(ws_detail, unique_table_fields_set)
 
     output = BytesIO()
     wb.save(output)
@@ -495,7 +494,7 @@ if st.button("Run Mapping", type="primary"):
 
             st.success(
                 f"Completed. Processed {len(fex_items)} file(s). "
-                f"Unique table-field pairs in Sheet2: {unique_count}."
+                f"Unique real table-field pairs added at bottom: {unique_count}."
             )
 
             st.download_button(
