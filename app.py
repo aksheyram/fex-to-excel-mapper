@@ -59,11 +59,10 @@ DETAIL_HEADERS = [
     'Formula',
     'Raw Source Field'
 ]
-
 DETAIL_WIDTHS = [38, 28, 22, 24, 14, 22, 30, 25, 14, 60, 40]
 
-AGG_HEADERS = ['Source/Table', 'Field Name']
-AGG_WIDTHS = [35, 35]
+SHEET2_HEADERS = ['Source/Table', 'Field Name']
+SHEET2_WIDTHS = [35, 35]
 
 
 def _fill(bg):
@@ -88,6 +87,11 @@ def setup_sheet(ws, headers, widths):
         _write_cell(ws, 1, col, h, hbg, hfg, bold=True)
         ws.column_dimensions[get_column_letter(col)].width = w
     ws.row_dimensions[1].height = 22
+
+
+def clear_sheet(ws):
+    if ws.max_row > 0:
+        ws.delete_rows(1, ws.max_row)
 
 
 def raw_db_fields(formula, defined_names):
@@ -116,28 +120,50 @@ def classify_field_role(field_name, source_name_set, calculated_name_set):
     return ''
 
 
-def is_real_source_table(table_name):
+def extract_hold_names(text):
+    hold_names = set()
+
+    # ON TABLE HOLD AS HLDPL
+    for name in re.findall(r'ON\s+TABLE\s+HOLD\s+AS\s+([A-Za-z_]\w*)', text, re.IGNORECASE):
+        hold_names.add(name.upper())
+
+    # ON TABLE HOLD
+    hold_names.add('HOLD')
+
+    return hold_names
+
+
+def is_hold_like_table(table_name, explicit_hold_names=None):
     if not table_name:
         return False
 
     t = str(table_name).strip().upper()
-
     if not t:
         return False
 
-    # exclude variable / hold style names
-    if t.startswith('&'):
-        return False
-    if t.startswith('HOLD'):
-        return False
-    if 'HOLD' in t:
-        return False
+    explicit_hold_names = explicit_hold_names or set()
 
-    return True
+    if t.startswith('&'):
+        return True
+
+    if t in explicit_hold_names:
+        return True
+
+    if t.startswith('HOLD'):
+        return True
+
+    if t.startswith('HLD'):
+        return True
+
+    if 'HOLD' in t:
+        return True
+
+    return False
 
 
 def parse_fex(fex_text):
     text = strip_comments(fex_text)
+    explicit_hold_names = extract_hold_names(text)
 
     result = {
         'sources': [],
@@ -151,11 +177,19 @@ def parse_fex(fex_text):
         'calculated_counts': {},
         'source_name_set': set(),
         'calculated_name_set': set(),
+        'real_sources': [],
+        'hold_names': explicit_hold_names,
     }
 
     table_src = re.findall(r'TABLE\s+FILE\s+(\S+)', text, re.IGNORECASE)
     define_src = re.findall(r'DEFINE\s+FILE\s+(\S+)', text, re.IGNORECASE)
     result['sources'] = list(dict.fromkeys(table_src + define_src))
+
+    result['real_sources'] = [
+        s for s in result['sources']
+        if not is_hold_like_table(s, explicit_hold_names)
+    ]
+
     primary = result['sources'][0] if result['sources'] else ''
     def_src = define_src[0] if define_src else primary
 
@@ -270,20 +304,22 @@ def detail_row_values(folder, fex_name, field_type, field_role, formula_step, mu
     ]
 
 
-def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
+def append_rows(ws_detail, parsed, folder, fex_name, sheet2_pairs):
     row = ws_detail.max_row + 1
 
     source_name_set = parsed['source_name_set']
     calculated_name_set = parsed['calculated_name_set']
     calculated_counts = parsed['calculated_counts']
     step_counter = defaultdict(int)
+    real_sources = parsed['real_sources']
+    hold_names = parsed['hold_names']
 
     def get_multiple_formula_flag(field_name):
         if field_name in calculated_counts:
             return 'Y' if calculated_counts[field_name] > 1 else 'N'
         return ''
 
-    def add_detail_and_unique(field_type, field_name, source_table, used_in, formula='', raw='', formula_step=''):
+    def add_detail_and_sheet2(field_type, field_name, source_table, used_in, formula='', raw='', formula_step=''):
         nonlocal row
 
         field_role = classify_field_role(field_name, source_name_set, calculated_name_set)
@@ -300,13 +336,20 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
             _write_cell(ws_detail, row, col, val, bg, fg)
         row += 1
 
-        if is_real_source_table(source_table) and field_name:
-            unique_table_fields_set.add((source_table, field_name))
+        # Sheet2 logic: source-only info, no hold files
+        if not field_name:
+            return
+
+        if source_table and not is_hold_like_table(source_table, hold_names):
+            sheet2_pairs.add((source_table, field_name))
+        else:
+            for real_table in real_sources:
+                sheet2_pairs.add((real_table, field_name))
 
     source_names_only = {f['field'] for f in parsed['source_fields']}
 
     for f in parsed['source_fields']:
-        add_detail_and_unique(
+        add_detail_and_sheet2(
             'Source Field (DB Column)',
             f['field'],
             f['source'],
@@ -315,7 +358,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
 
     for f in parsed['define_fields']:
         step_counter[f['field']] += 1
-        add_detail_and_unique(
+        add_detail_and_sheet2(
             'Calculated - DEFINE',
             f['field'],
             f['source'],
@@ -327,7 +370,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
 
     for f in parsed['compute_fields']:
         step_counter[f['field']] += 1
-        add_detail_and_unique(
+        add_detail_and_sheet2(
             'Calculated - COMPUTE',
             f['field'],
             f['source'],
@@ -340,7 +383,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
     for f in parsed['by_real']:
         if f['field'] in source_names_only:
             continue
-        add_detail_and_unique(
+        add_detail_and_sheet2(
             'BY Field (Real)',
             f['field'],
             f['source'],
@@ -348,7 +391,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
         )
 
     for f in parsed['by_calc']:
-        add_detail_and_unique(
+        add_detail_and_sheet2(
             'BY Field (Calculated)',
             f['field'],
             f['source'],
@@ -356,21 +399,15 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
         )
 
 
-def write_aggregated_section(ws, unique_table_fields_set):
-    start_row = ws.max_row + 3
+def write_sheet2(ws_sheet2, sheet2_pairs):
+    setup_sheet(ws_sheet2, SHEET2_HEADERS, SHEET2_WIDTHS)
 
-    _write_cell(ws, start_row, 1, 'Source/Table', COLORS['header'][0], COLORS['header'][1], bold=True)
-    _write_cell(ws, start_row, 2, 'Field Name', COLORS['header'][0], COLORS['header'][1], bold=True)
-
-    ws.column_dimensions[get_column_letter(1)].width = max(ws.column_dimensions[get_column_letter(1)].width, 35)
-    ws.column_dimensions[get_column_letter(2)].width = max(ws.column_dimensions[get_column_letter(2)].width, 35)
-
-    agg_row = start_row + 1
-
-    for table_name, field_name in sorted(unique_table_fields_set, key=lambda x: (str(x[0]).lower(), str(x[1]).lower())):
-        _write_cell(ws, agg_row, 1, table_name)
-        _write_cell(ws, agg_row, 2, field_name)
-        agg_row += 1
+    for row_num, (table_name, field_name) in enumerate(
+        sorted(sheet2_pairs, key=lambda x: (str(x[0]).lower(), str(x[1]).lower())),
+        start=2
+    ):
+        _write_cell(ws_sheet2, row_num, 1, table_name)
+        _write_cell(ws_sheet2, row_num, 2, field_name)
 
 
 def read_uploaded_fex(uploaded_file):
@@ -397,23 +434,28 @@ def prepare_workbook(template_bytes):
     if 'Legend' in wb.sheetnames:
         wb.remove(wb['Legend'])
 
+    # Sheet1
     ws_detail = wb[wb.sheetnames[0]]
     ws_detail.title = 'Sheet1'
+    clear_sheet(ws_detail)
+    setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
 
-    # rewrite header row
-    hbg, hfg = COLORS['header']
-    for col, (h, w) in enumerate(zip(DETAIL_HEADERS, DETAIL_WIDTHS), 1):
-        _write_cell(ws_detail, 1, col, h, hbg, hfg, bold=True)
-        ws_detail.column_dimensions[get_column_letter(col)].width = w
-    ws_detail.row_dimensions[1].height = 22
+    # Sheet2
+    if 'Sheet2' in wb.sheetnames:
+        ws_sheet2 = wb['Sheet2']
+        clear_sheet(ws_sheet2)
+    else:
+        ws_sheet2 = wb.create_sheet('Sheet2')
 
-    return wb, ws_detail
+    setup_sheet(ws_sheet2, SHEET2_HEADERS, SHEET2_WIDTHS)
+
+    return wb, ws_detail, ws_sheet2
 
 
 def build_output_workbook(template_bytes, fex_items):
-    wb, ws_detail = prepare_workbook(template_bytes)
+    wb, ws_detail, ws_sheet2 = prepare_workbook(template_bytes)
 
-    unique_table_fields_set = set()
+    sheet2_pairs = set()
     errors = []
 
     total = len(fex_items)
@@ -423,20 +465,20 @@ def build_output_workbook(template_bytes, fex_items):
     for idx, (folder, fex_name, content) in enumerate(fex_items, start=1):
         try:
             parsed = parse_fex(content)
-            append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set)
+            append_rows(ws_detail, parsed, folder, fex_name, sheet2_pairs)
         except Exception as e:
             errors.append(f"{fex_name}: {e}")
 
         progress.progress(idx / total)
         status.text(f"Processing {idx} of {total}: {fex_name}")
 
-    write_aggregated_section(ws_detail, unique_table_fields_set)
+    write_sheet2(ws_sheet2, sheet2_pairs)
 
     output = BytesIO()
     wb.save(output)
     output.seek(0)
 
-    return output, errors, len(unique_table_fields_set)
+    return output, errors, len(sheet2_pairs)
 
 
 st.set_page_config(page_title="WebFOCUS FEX to Excel Mapper", layout="wide")
@@ -487,14 +529,14 @@ if st.button("Run Mapping", type="primary"):
                     st.error("No .fex files found inside the ZIP.")
                     st.stop()
 
-            output_stream, errors, unique_count = build_output_workbook(
+            output_stream, errors, sheet2_count = build_output_workbook(
                 template_file.getvalue(),
                 fex_items
             )
 
             st.success(
                 f"Completed. Processed {len(fex_items)} file(s). "
-                f"Unique real table-field pairs added at bottom: {unique_count}."
+                f"Sheet2 source-only pairs: {sheet2_count}."
             )
 
             st.download_button(
