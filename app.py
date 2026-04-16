@@ -307,7 +307,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
         row += 1
 
         if source_table and field_name:
-            unique_table_fields_set.add((source_table, field_name))
+            unique_table_fields_set.add((str(source_table), str(field_name)))
 
     source_names_only = {f['field'] for f in parsed['source_fields']}
 
@@ -365,10 +365,12 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
 def write_aggregated_sheet(ws, unique_table_fields_set):
     setup_sheet(ws, AGG_HEADERS, AGG_WIDTHS)
 
-    for row_num, (table_name, field_name) in enumerate(
-        sorted(unique_table_fields_set, key=lambda x: (str(x[0]).lower(), str(x[1]).lower())),
-        start=2
-    ):
+    sorted_rows = sorted(
+        unique_table_fields_set,
+        key=lambda x: (x[0].lower(), x[1].lower())
+    )
+
+    for row_num, (table_name, field_name) in enumerate(sorted_rows, start=2):
         _write_cell(ws, row_num, 1, table_name)
         _write_cell(ws, row_num, 2, field_name)
 
@@ -393,17 +395,17 @@ def collect_fex_from_zip(uploaded_zip):
 def prepare_workbook(template_bytes):
     wb = load_workbook(BytesIO(template_bytes))
 
+    # Sheet1
     ws_detail = wb[wb.sheetnames[0]]
     ws_detail.title = 'Detailed Fields'
     setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
 
-    # remove old aggregate sheets if they exist
-    for sheet_name in ['Unique Fields', 'Tables', 'Unique Table Fields']:
-        if sheet_name in wb.sheetnames:
-            wb.remove(wb[sheet_name])
+    # Sheet2 must already exist in template
+    if len(wb.sheetnames) < 2:
+        raise ValueError("Template must contain Sheet2 for aggregated Source/Table and Field Name output.")
 
-    # create single aggregate sheet
-    ws_agg = wb.create_sheet('Unique Table Fields')
+    ws_agg = wb[wb.sheetnames[1]]
+    ws_agg.title = 'Unique Table Fields'
     setup_sheet(ws_agg, AGG_HEADERS, AGG_WIDTHS)
 
     ensure_legend(wb)
@@ -453,7 +455,11 @@ with col1:
 
 with col2:
     if mode == "Multiple FEX Files":
-        uploaded_fex_files = st.file_uploader("Upload one or more .fex files", type=["fex"], accept_multiple_files=True)
+        uploaded_fex_files = st.file_uploader(
+            "Upload one or more .fex files",
+            type=["fex"],
+            accept_multiple_files=True
+        )
         uploaded_zip = None
     else:
         uploaded_zip = st.file_uploader("Upload ZIP file", type=["zip"])
@@ -495,7 +501,7 @@ if st.button("Run Mapping", type="primary"):
 
             st.success(
                 f"Completed. Processed {len(fex_items)} file(s). "
-                f"Unique table-field pairs in Sheet2: {unique_count}."
+                f"Unique Source/Table + Field Name pairs in Sheet2: {unique_count}."
             )
 
             st.download_button(
