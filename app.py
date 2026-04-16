@@ -82,7 +82,21 @@ def _write_cell(ws, row, col, val, bg='FFFFFF', fg='000000', bold=False):
     c.border = BORDER
 
 
+def clear_sheet_data(ws):
+    max_row = ws.max_row
+    max_col = ws.max_column
+    if max_row > 1:
+        for row in ws.iter_rows(min_row=2, max_row=max_row, min_col=1, max_col=max_col):
+            for cell in row:
+                cell.value = None
+                cell.fill = PatternFill(fill_type=None)
+                cell.border = Border()
+                cell.alignment = Alignment()
+                cell.font = Font()
+
+
 def setup_sheet(ws, headers, widths):
+    clear_sheet_data(ws)
     hbg, hfg = COLORS['header']
     for col, (h, w) in enumerate(zip(headers, widths), 1):
         _write_cell(ws, 1, col, h, hbg, hfg, bold=True)
@@ -307,7 +321,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
         row += 1
 
         if source_table and field_name:
-            unique_table_fields_set.add((str(source_table), str(field_name)))
+            unique_table_fields_set.add((str(source_table).strip(), str(field_name).strip()))
 
     source_names_only = {f['field'] for f in parsed['source_fields']}
 
@@ -395,17 +409,15 @@ def collect_fex_from_zip(uploaded_zip):
 def prepare_workbook(template_bytes):
     wb = load_workbook(BytesIO(template_bytes))
 
-    # Sheet1
-    ws_detail = wb[wb.sheetnames[0]]
-    ws_detail.title = 'Detailed Fields'
+    if 'Sheet1' not in wb.sheetnames:
+        raise ValueError("Template must contain a sheet named 'Sheet1'.")
+    if 'Sheet2' not in wb.sheetnames:
+        raise ValueError("Template must contain a sheet named 'Sheet2'.")
+
+    ws_detail = wb['Sheet1']
+    ws_agg = wb['Sheet2']
+
     setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
-
-    # Sheet2 must already exist in template
-    if len(wb.sheetnames) < 2:
-        raise ValueError("Template must contain Sheet2 for aggregated Source/Table and Field Name output.")
-
-    ws_agg = wb[wb.sheetnames[1]]
-    ws_agg.title = 'Unique Table Fields'
     setup_sheet(ws_agg, AGG_HEADERS, AGG_WIDTHS)
 
     ensure_legend(wb)
