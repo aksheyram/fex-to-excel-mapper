@@ -82,21 +82,7 @@ def _write_cell(ws, row, col, val, bg='FFFFFF', fg='000000', bold=False):
     c.border = BORDER
 
 
-def clear_sheet_data(ws):
-    max_row = ws.max_row
-    max_col = ws.max_column
-    if max_row > 1:
-        for row in ws.iter_rows(min_row=2, max_row=max_row, min_col=1, max_col=max_col):
-            for cell in row:
-                cell.value = None
-                cell.fill = PatternFill(fill_type=None)
-                cell.border = Border()
-                cell.alignment = Alignment()
-                cell.font = Font()
-
-
 def setup_sheet(ws, headers, widths):
-    clear_sheet_data(ws)
     hbg, hfg = COLORS['header']
     for col, (h, w) in enumerate(zip(headers, widths), 1):
         _write_cell(ws, 1, col, h, hbg, hfg, bold=True)
@@ -290,8 +276,8 @@ def detail_row_values(folder, fex_name, field_type, field_role, formula_step, mu
     ]
 
 
-def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set, start_row):
-    row = start_row
+def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
+    row = ws_detail.max_row + 1
 
     source_name_set = parsed['source_name_set']
     calculated_name_set = parsed['calculated_name_set']
@@ -321,7 +307,7 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set, st
         row += 1
 
         if source_table and field_name:
-            unique_table_fields_set.add((str(source_table).strip(), str(field_name).strip()))
+            unique_table_fields_set.add((source_table, field_name))
 
     source_names_only = {f['field'] for f in parsed['source_fields']}
 
@@ -375,17 +361,14 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set, st
             'BY'
         )
 
-    return row  # return next available row after all rows written
-
 
 def write_aggregated_sheet(ws, unique_table_fields_set):
-    # Headers already written by prepare_workbook — just write data rows
-    sorted_rows = sorted(
-        unique_table_fields_set,
-        key=lambda x: (x[0].lower(), x[1].lower())
-    )
+    setup_sheet(ws, AGG_HEADERS, AGG_WIDTHS)
 
-    for row_num, (table_name, field_name) in enumerate(sorted_rows, start=2):
+    for row_num, (table_name, field_name) in enumerate(
+        sorted(unique_table_fields_set, key=lambda x: (str(x[0]).lower(), str(x[1]).lower())),
+        start=2
+    ):
         _write_cell(ws, row_num, 1, table_name)
         _write_cell(ws, row_num, 2, field_name)
 
@@ -410,15 +393,17 @@ def collect_fex_from_zip(uploaded_zip):
 def prepare_workbook(template_bytes):
     wb = load_workbook(BytesIO(template_bytes))
 
-    if 'Sheet1' not in wb.sheetnames:
-        raise ValueError("Template must contain a sheet named 'Sheet1'.")
-    if 'Sheet2' not in wb.sheetnames:
-        raise ValueError("Template must contain a sheet named 'Sheet2'.")
-
-    ws_detail = wb['Sheet1']
-    ws_agg = wb['Sheet2']
-
+    ws_detail = wb[wb.sheetnames[0]]
+    ws_detail.title = 'Detailed Fields'
     setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
+
+    # remove old aggregate sheets if they exist
+    for sheet_name in ['Unique Fields', 'Tables', 'Unique Table Fields']:
+        if sheet_name in wb.sheetnames:
+            wb.remove(wb[sheet_name])
+
+    # create single aggregate sheet
+    ws_agg = wb.create_sheet('Unique Table Fields')
     setup_sheet(ws_agg, AGG_HEADERS, AGG_WIDTHS)
 
     ensure_legend(wb)
@@ -436,12 +421,10 @@ def build_output_workbook(template_bytes, fex_items):
     progress = st.progress(0)
     status = st.empty()
 
-    next_row = 2  # row 1 is the header row
-
     for idx, (folder, fex_name, content) in enumerate(fex_items, start=1):
         try:
             parsed = parse_fex(content)
-            next_row = append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set, next_row)
+            append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set)
         except Exception as e:
             errors.append(f"{fex_name}: {e}")
 
@@ -470,11 +453,7 @@ with col1:
 
 with col2:
     if mode == "Multiple FEX Files":
-        uploaded_fex_files = st.file_uploader(
-            "Upload one or more .fex files",
-            type=["fex"],
-            accept_multiple_files=True
-        )
+        uploaded_fex_files = st.file_uploader("Upload one or more .fex files", type=["fex"], accept_multiple_files=True)
         uploaded_zip = None
     else:
         uploaded_zip = st.file_uploader("Upload ZIP file", type=["zip"])
@@ -516,7 +495,7 @@ if st.button("Run Mapping", type="primary"):
 
             st.success(
                 f"Completed. Processed {len(fex_items)} file(s). "
-                f"Unique Source/Table + Field Name pairs in Sheet2: {unique_count}."
+                f"Unique table-field pairs in Sheet2: {unique_count}."
             )
 
             st.download_button(
