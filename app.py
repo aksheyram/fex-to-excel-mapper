@@ -434,27 +434,23 @@ def collect_fex_from_zip(uploaded_zip):
 def prepare_workbook(template_bytes):
     wb = load_workbook(BytesIO(template_bytes))
 
+    # Rename first sheet
     ws_detail = wb[wb.sheetnames[0]]
     ws_detail.title = 'Detailed Fields'
     setup_sheet(ws_detail, DETAIL_HEADERS, DETAIL_WIDTHS)
 
-    if len(wb.sheetnames) >= 2:
-        ws_unique = wb[wb.sheetnames[1]]
-        ws_unique.title = 'Unique Fields'
-    else:
-        ws_unique = wb.create_sheet('Unique Fields')
+    # ALWAYS create fresh Sheet2 & Sheet3
+    if 'Unique Fields' in wb.sheetnames:
+        wb.remove(wb['Unique Fields'])
+    if 'Tables' in wb.sheetnames:
+        wb.remove(wb['Tables'])
 
-    if len(wb.sheetnames) >= 3:
-        ws_tables = wb[wb.sheetnames[2]]
-        ws_tables.title = 'Tables'
-    else:
-        ws_tables = wb.create_sheet('Tables')
-
-    for extra_name in wb.sheetnames[3:]:
-        pass
+    ws_unique = wb.create_sheet('Unique Fields')
+    ws_tables = wb.create_sheet('Tables')
 
     setup_sheet(ws_unique, UNIQUE_FIELD_HEADERS, UNIQUE_FIELD_WIDTHS)
     setup_sheet(ws_tables, TABLE_HEADERS, TABLE_WIDTHS)
+
     ensure_legend(wb)
 
     return wb, ws_detail, ws_unique, ws_tables
