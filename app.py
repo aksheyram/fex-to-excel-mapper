@@ -290,8 +290,8 @@ def detail_row_values(folder, fex_name, field_type, field_role, formula_step, mu
     ]
 
 
-def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
-    row = ws_detail.max_row + 1
+def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set, start_row):
+    row = start_row
 
     source_name_set = parsed['source_name_set']
     calculated_name_set = parsed['calculated_name_set']
@@ -375,10 +375,11 @@ def append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set):
             'BY'
         )
 
+    return row  # return next available row after all rows written
+
 
 def write_aggregated_sheet(ws, unique_table_fields_set):
-    setup_sheet(ws, AGG_HEADERS, AGG_WIDTHS)
-
+    # Headers already written by prepare_workbook — just write data rows
     sorted_rows = sorted(
         unique_table_fields_set,
         key=lambda x: (x[0].lower(), x[1].lower())
@@ -435,10 +436,12 @@ def build_output_workbook(template_bytes, fex_items):
     progress = st.progress(0)
     status = st.empty()
 
+    next_row = 2  # row 1 is the header row
+
     for idx, (folder, fex_name, content) in enumerate(fex_items, start=1):
         try:
             parsed = parse_fex(content)
-            append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set)
+            next_row = append_rows(ws_detail, parsed, folder, fex_name, unique_table_fields_set, next_row)
         except Exception as e:
             errors.append(f"{fex_name}: {e}")
 
