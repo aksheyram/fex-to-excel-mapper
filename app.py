@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 from collections import Counter, defaultdict
 
+import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -74,6 +75,12 @@ SHEET3_WIDTHS = [14, 18, 38, 35, 55, 14]
 SHEET4_HEADERS = ['Metric', 'Count']
 SHEET4_WIDTHS = [35, 35]
 
+SHEET5_HEADERS = ['Resource Analyzer Program', 'Matched FEX File']
+SHEET5_WIDTHS = [50, 50]
+
+SHEET6_HEADERS = ['Ignored Folder', 'Ignored FEX File', 'Reason']
+SHEET6_WIDTHS = [45, 45, 45]
+
 
 def _fill(bg):
     return PatternFill('solid', start_color=bg)
@@ -104,6 +111,121 @@ def setup_sheet(ws, headers, widths):
 def clear_sheet(ws):
     if ws.max_row > 0:
         ws.delete_rows(1, ws.max_row)
+
+
+def normalize_program_name(value):
+    if value is None:
+        return ''
+
+    text = str(value).strip()
+
+    if not text or text.lower() == 'nan':
+        return ''
+
+    text = text.replace('\\', '/')
+    text = text.split('/')[-1]
+    text = text.strip()
+
+    if text.lower().endswith('.fex'):
+        text = text[:-4]
+
+    text = re.sub(r'[^A-Za-z0-9_.$#-]+', '', text)
+
+    return text.upper()
+
+
+def extract_program_tokens_from_text(value):
+    if value is None:
+        return set()
+
+    text = str(value).strip()
+
+    if not text or text.lower() == 'nan':
+        return set()
+
+    tokens = set()
+
+    fex_matches = re.findall(r'([A-Za-z0-9_.$#/-]+\.fex)', text, flags=re.IGNORECASE)
+
+    for item in fex_matches:
+        normalized = normalize_program_name(item)
+        if normalized:
+            tokens.add(normalized)
+
+    if not tokens:
+        cleaned = normalize_program_name(text)
+        if cleaned and len(cleaned) >= 3:
+            tokens.add(cleaned)
+
+    return tokens
+
+
+def read_resource_analyzer_file(uploaded_ra_file):
+    if uploaded_ra_file is None:
+        return set(), []
+
+    file_name = uploaded_ra_file.name.lower()
+    program_names = set()
+    raw_values = []
+
+    if file_name.endswith('.csv'):
+        df_map = {'ResourceAnalyzer': pd.read_csv(uploaded_ra_file, dtype=str)}
+    else:
+        df_map = pd.read_excel(uploaded_ra_file, sheet_name=None, dtype=str)
+
+    preferred_header_terms = [
+        'program',
+        'procedure',
+        'report',
+        'fex',
+        'focexec',
+        'app',
+        'name',
+        'object',
+    ]
+
+    for sheet_name, df in df_map.items():
+        if df is None or df.empty:
+            continue
+
+        df = df.fillna('')
+
+        preferred_columns = []
+        for col in df.columns:
+            col_text = str(col).strip().lower()
+            if any(term in col_text for term in preferred_header_terms):
+                preferred_columns.append(col)
+
+        columns_to_scan = preferred_columns if preferred_columns else list(df.columns)
+
+        for col in columns_to_scan:
+            for value in df[col].astype(str).tolist():
+                extracted = extract_program_tokens_from_text(value)
+                for item in extracted:
+                    program_names.add(item)
+                    raw_values.append((str(value), item))
+
+    return program_names, raw_values
+
+
+def filter_fex_items_by_resource_analyzer(fex_items, allowed_program_names):
+    if not allowed_program_names:
+        return fex_items, [], []
+
+    matched_items = []
+    ignored_items = []
+    matched_pairs = []
+
+    for folder, fex_name, content in fex_items:
+        normalized_fex = normalize_program_name(fex_name)
+
+        if normalized_fex in allowed_program_names:
+            matched_items.append((folder, fex_name, content))
+            matched_pairs.append((normalized_fex, fex_name))
+        else:
+            ignored_items.append((folder, fex_name, 'Not listed in Resource Analyzer file'))
+
+    return matched_items, ignored_items, matched_pairs
 
 
 def raw_db_fields(formula, defined_names):
@@ -541,15 +663,17 @@ def write_sheet3(ws_sheet3, groups, group_map, unparsed):
             row += 1
 
 
-def write_sheet4(ws_sheet4, total_reports, migration_count, unique_tables):
+def write_sheet4(ws_sheet4, total_reports_available, total_reports_processed, migration_count, unique_tables, ignored_count):
     setup_sheet(ws_sheet4, SHEET4_HEADERS, SHEET4_WIDTHS)
 
     total_tables = len(unique_tables)
 
     summary_rows = [
-        ('Total Number of Reports', total_reports),
-        ('Total Consolidated', migration_count),
-        ('Total Tables', total_tables),
+        ('Total FEX Files Available in Folder/ZIP', total_reports_available),
+        ('Total Reports Processed from Resource Analyzer', total_reports_processed),
+        ('Total Consolidated after Duplicate Elimination', migration_count),
+        ('Total Unique Tables', total_tables),
+        ('Total Ignored Files', ignored_count),
     ]
 
     row_num = 2
@@ -570,6 +694,35 @@ def write_sheet4(ws_sheet4, total_reports, migration_count, unique_tables):
         _write_cell(ws_sheet4, row_num, 1, idx, 'FFFFFF', '000000')
         _write_cell(ws_sheet4, row_num, 2, table_name, 'FFFFFF', '000000')
         row_num += 1
+
+
+def write_sheet5(ws_sheet5, matched_pairs, allowed_program_names):
+    setup_sheet(ws_sheet5, SHEET5_HEADERS, SHEET5_WIDTHS)
+
+    row = 2
+    matched_lookup = defaultdict(list)
+
+    for ra_program, fex_name in matched_pairs:
+        matched_lookup[ra_program].append(fex_name)
+
+    for program_name in sorted(allowed_program_names):
+        matched_files = ', '.join(sorted(set(matched_lookup.get(program_name, []))))
+
+        _write_cell(ws_sheet5, row, 1, program_name, 'FFFFFF', '000000')
+        _write_cell(ws_sheet5, row, 2, matched_files if matched_files else 'Not Found in Uploaded FEX Folder/ZIP', 'FFFFFF', '000000')
+        row += 1
+
+
+def write_sheet6(ws_sheet6, ignored_items):
+    setup_sheet(ws_sheet6, SHEET6_HEADERS, SHEET6_WIDTHS)
+
+    row = 2
+
+    for folder, fex_name, reason in sorted(ignored_items, key=lambda x: (x[0].lower(), x[1].lower())):
+        _write_cell(ws_sheet6, row, 1, folder, 'FFFFFF', '000000')
+        _write_cell(ws_sheet6, row, 2, fex_name, 'FFFFFF', '000000')
+        _write_cell(ws_sheet6, row, 3, reason, 'FFFFFF', '000000')
+        row += 1
 
 
 def read_uploaded_fex(uploaded_file):
@@ -629,11 +782,36 @@ def prepare_workbook(template_bytes):
     ws_sheet4.title = 'Summary Report'
     setup_sheet(ws_sheet4, SHEET4_HEADERS, SHEET4_WIDTHS)
 
-    return wb, ws_detail, ws_sheet2, ws_sheet3, ws_sheet4
+    if 'Sheet5' in wb.sheetnames:
+        ws_sheet5 = wb['Sheet5']
+        clear_sheet(ws_sheet5)
+    else:
+        ws_sheet5 = wb.create_sheet('Sheet5')
+
+    ws_sheet5.title = 'Resource Analyzer Match'
+    setup_sheet(ws_sheet5, SHEET5_HEADERS, SHEET5_WIDTHS)
+
+    if 'Sheet6' in wb.sheetnames:
+        ws_sheet6 = wb['Sheet6']
+        clear_sheet(ws_sheet6)
+    else:
+        ws_sheet6 = wb.create_sheet('Sheet6')
+
+    ws_sheet6.title = 'Ignored Files'
+    setup_sheet(ws_sheet6, SHEET6_HEADERS, SHEET6_WIDTHS)
+
+    return wb, ws_detail, ws_sheet2, ws_sheet3, ws_sheet4, ws_sheet5, ws_sheet6
 
 
-def build_output_workbook(template_bytes, fex_items):
-    wb, ws_detail, ws_sheet2, ws_sheet3, ws_sheet4 = prepare_workbook(template_bytes)
+def build_output_workbook(
+    template_bytes,
+    fex_items,
+    total_reports_available,
+    ignored_items,
+    matched_pairs,
+    allowed_program_names
+):
+    wb, ws_detail, ws_sheet2, ws_sheet3, ws_sheet4, ws_sheet5, ws_sheet6 = prepare_workbook(template_bytes)
 
     errors = []
     total = len(fex_items)
@@ -641,7 +819,7 @@ def build_output_workbook(template_bytes, fex_items):
     progress = st.progress(0)
     status = st.empty()
 
-    status.text("Pass 1 of 2: Parsing FEX files...")
+    status.text("Pass 1 of 2: Parsing selected FEX files...")
 
     parsed_results = []
     fex_fingerprints = []
@@ -659,7 +837,7 @@ def build_output_workbook(template_bytes, fex_items):
             parsed_results.append((folder, fex_name, None))
             fex_fingerprints.append((folder, fex_name, None))
 
-        progress.progress(idx / total * 0.45)
+        progress.progress(idx / total * 0.45 if total else 1.0)
 
     group_map, groups, unparsed = build_group_map(fex_fingerprints)
 
@@ -674,7 +852,7 @@ def build_output_workbook(template_bytes, fex_items):
         except Exception as e:
             errors.append(f"{fex_name} (write): {e}")
 
-        progress.progress(0.45 + idx / total * 0.45)
+        progress.progress(0.45 + idx / total * 0.45 if total else 1.0)
 
     write_sheet2(ws_sheet2, group_map, groups, unparsed)
     write_sheet3(ws_sheet3, groups, group_map, unparsed)
@@ -695,7 +873,17 @@ def build_output_workbook(template_bytes, fex_items):
 
     total_tables = len(unique_tables)
 
-    write_sheet4(ws_sheet4, len(fex_items), migration_count, unique_tables)
+    write_sheet4(
+        ws_sheet4,
+        total_reports_available,
+        len(fex_items),
+        migration_count,
+        unique_tables,
+        len(ignored_items)
+    )
+
+    write_sheet5(ws_sheet5, matched_pairs, allowed_program_names)
+    write_sheet6(ws_sheet6, ignored_items)
 
     progress.progress(1.0)
 
@@ -715,15 +903,24 @@ def build_output_workbook(template_bytes, fex_items):
     )
 
 
-st.set_page_config(page_title="WebFOCUS FEX to Excel Mapper", layout="wide")
+st.set_page_config(page_title="WebFOCUS Resource Analyzer Mapper", layout="wide")
 
-st.title("WebFOCUS FEX to Excel Mapper")
-st.markdown("Upload your template and either FEX files or a ZIP containing FEX files.")
+st.title("WebFOCUS Resource Analyzer Mapper")
+st.markdown(
+    """
+    Upload the Resource Analyzer file, template Excel, and FEX folder/ZIP.  
+    If the Resource Analyzer file is uploaded, the program will document only the FEX files listed in that file.
+    """
+)
 
 col1, col2 = st.columns(2)
 
 with col1:
     template_file = st.file_uploader("Upload Template XLSX", type=["xlsx"])
+    resource_analyzer_file = st.file_uploader(
+        "Optional Resource Analyzer Bucket/File",
+        type=["xlsx", "xls", "csv"]
+    )
     mode = st.radio("Input Type", ["Multiple FEX Files", "ZIP File"], horizontal=True)
 
 with col2:
@@ -735,29 +932,30 @@ with col2:
         )
         uploaded_zip = None
     else:
-        uploaded_zip = st.file_uploader("Upload ZIP file", type=["zip"])
+        uploaded_zip = st.file_uploader("Upload ZIP file containing FEX files", type=["zip"])
         uploaded_fex_files = []
 
-output_name = st.text_input("Output file name", value="Ulbrich_output.xlsx")
+output_name = st.text_input("Output file name", value="Resource_Analyzer_Filtered_Output.xlsx")
 
-with st.expander("How duplicate grouping works", expanded=False):
+with st.expander("How this version works", expanded=True):
     st.markdown(
         """
-        Two FEX files land in the **same group** when they share exactly:
-        - The same real DB source tables
-        - The same set of all field names
+        This version concentrates only on the Resource Analyzer list.
 
-        **Sheet1** shows field-level details.
+        If you upload the optional Resource Analyzer file:
+        - The program reads the report/program/FEX names from that file.
+        - It scans the uploaded FEX folder or ZIP.
+        - It processes only the matching FEX files.
+        - It ignores all other FEX files.
+        - The ignored files are documented in the **Ignored Files** sheet.
 
-        **Sheet2** shows the unique report migration list.
-
-        **Sheet3** shows duplicate groups.
-
-        **Sheet4** shows the summary report:
-        - Total Number of Reports
-        - Total Consolidated after duplicate elimination
-        - Total unique source tables
-        - Full list of all unique source tables used
+        Output sheets:
+        - **Sheet1**: Full data catalogue
+        - **Unique Reports**: Final unique reports after duplicate elimination
+        - **Duplicate Groups**: Duplicate group details
+        - **Summary Report**: Total reports, consolidated count, unique table count, and full unique table list
+        - **Resource Analyzer Match**: Resource Analyzer list vs matched FEX files
+        - **Ignored Files**: Files skipped because they were not in Resource Analyzer
         """
     )
 
@@ -765,27 +963,48 @@ if st.button("Run Mapping", type="primary"):
     if not template_file:
         st.error("Please upload the template Excel file.")
     else:
-        fex_items = []
-
         try:
             if mode == "Multiple FEX Files":
                 if not uploaded_fex_files:
                     st.error("Please upload at least one .fex file.")
                     st.stop()
 
-                for f in uploaded_fex_files:
-                    fex_items.append(("uploaded_files", f.name, read_uploaded_fex(f)))
+                all_fex_items = [
+                    ("uploaded_files", f.name, read_uploaded_fex(f))
+                    for f in uploaded_fex_files
+                ]
 
             else:
                 if not uploaded_zip:
                     st.error("Please upload a ZIP file.")
                     st.stop()
 
-                fex_items = collect_fex_from_zip(uploaded_zip)
+                all_fex_items = collect_fex_from_zip(uploaded_zip)
 
-                if not fex_items:
+                if not all_fex_items:
                     st.error("No .fex files found inside the ZIP.")
                     st.stop()
+
+            total_reports_available = len(all_fex_items)
+
+            allowed_program_names, raw_ra_values = read_resource_analyzer_file(resource_analyzer_file)
+
+            if resource_analyzer_file is not None and not allowed_program_names:
+                st.error("Resource Analyzer file was uploaded, but no program/report/FEX names could be detected.")
+                st.stop()
+
+            selected_fex_items, ignored_items, matched_pairs = filter_fex_items_by_resource_analyzer(
+                all_fex_items,
+                allowed_program_names
+            )
+
+            if resource_analyzer_file is not None and not selected_fex_items:
+                st.error("No matching FEX files were found from the Resource Analyzer list.")
+                st.stop()
+
+            if resource_analyzer_file is None:
+                allowed_program_names = {normalize_program_name(fex_name) for _, fex_name, _ in selected_fex_items}
+                matched_pairs = [(normalize_program_name(fex_name), fex_name) for _, fex_name, _ in selected_fex_items]
 
             (
                 output_stream,
@@ -796,11 +1015,20 @@ if st.button("Run Mapping", type="primary"):
                 unparsed_count,
                 migration_count,
                 total_tables,
-            ) = build_output_workbook(template_file.getvalue(), fex_items)
+            ) = build_output_workbook(
+                template_file.getvalue(),
+                selected_fex_items,
+                total_reports_available,
+                ignored_items,
+                matched_pairs,
+                allowed_program_names
+            )
 
             st.success(
-                f"Completed. Processed **{len(fex_items)}** FEX file(s). "
-                f"Final consolidated count after duplicate elimination: **{migration_count}**. "
+                f"Completed. Available FEX files: **{total_reports_available}**. "
+                f"Processed from Resource Analyzer: **{len(selected_fex_items)}**. "
+                f"Ignored files: **{len(ignored_items)}**. "
+                f"Final consolidated count: **{migration_count}**. "
                 f"Total unique source tables: **{total_tables}**."
             )
 
