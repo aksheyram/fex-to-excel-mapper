@@ -72,7 +72,7 @@ SHEET3_HEADERS = [
 SHEET3_WIDTHS = [14, 18, 38, 35, 55, 14]
 
 SHEET4_HEADERS = ['Metric', 'Count']
-SHEET4_WIDTHS = [35, 18]
+SHEET4_WIDTHS = [35, 35]
 
 
 def _fill(bg):
@@ -93,9 +93,11 @@ def _write_cell(ws, row, col, val, bg='FFFFFF', fg='000000', bold=False):
 
 def setup_sheet(ws, headers, widths):
     hbg, hfg = COLORS['header']
+
     for col, (h, w) in enumerate(zip(headers, widths), 1):
         _write_cell(ws, 1, col, h, hbg, hfg, bold=True)
         ws.column_dimensions[get_column_letter(col)].width = w
+
     ws.row_dimensions[1].height = 22
 
 
@@ -106,14 +108,20 @@ def clear_sheet(ws):
 
 def raw_db_fields(formula, defined_names):
     tokens = re.findall(r'\b([A-Z][A-Z0-9_]{2,})\b', formula)
-    return sorted({t for t in tokens if t not in WF_KEYWORDS and t not in defined_names})
+
+    return sorted({
+        t for t in tokens
+        if t not in WF_KEYWORDS and t not in defined_names
+    })
 
 
 def strip_comments(text):
     lines = [
         line for line in text.splitlines()
-        if not line.strip().startswith('-*') and not line.strip().startswith('-!')
+        if not line.strip().startswith('-*')
+        and not line.strip().startswith('-!')
     ]
+
     return '\n'.join(lines)
 
 
@@ -127,16 +135,22 @@ def classify_field_role(field_name, source_name_set, calculated_name_set):
         return 'DB Source Only'
     if in_calc:
         return 'Calculated Only'
+
     return ''
 
 
 def extract_hold_names(text):
     hold_names = set()
 
-    for name in re.findall(r'ON\s+TABLE\s+HOLD\s+AS\s+([A-Za-z_]\w*)', text, re.IGNORECASE):
+    for name in re.findall(
+        r'ON\s+TABLE\s+HOLD\s+AS\s+([A-Za-z_]\w*)',
+        text,
+        re.IGNORECASE
+    ):
         hold_names.add(name.upper())
 
     hold_names.add('HOLD')
+
     return hold_names
 
 
@@ -198,7 +212,11 @@ def parse_fex(fex_text):
     primary = result['sources'][0] if result['sources'] else ''
     def_src = define_src[0] if define_src else primary
 
-    for block in re.findall(r'DEFINE\s+FILE\s+\S+\s*(.*?)END', text, re.IGNORECASE | re.DOTALL):
+    for block in re.findall(
+        r'DEFINE\s+FILE\s+\S+\s*(.*?)END',
+        text,
+        re.IGNORECASE | re.DOTALL
+    ):
         for fname, fmt, formula in re.findall(
             r'([A-Za-z_]\w*)\s*/\s*([A-Za-z0-9%.]+)\s*=\s*(.*?);',
             block,
@@ -216,6 +234,7 @@ def parse_fex(fex_text):
 
     for f in result['define_fields']:
         f['raw_fields'] = raw_db_fields(f['formula'], defined_names)
+
         for r in f['raw_fields']:
             raw_set.add((r, f['source']))
 
@@ -358,7 +377,9 @@ def append_rows(ws_detail, parsed, folder, fex_name):
     step_counter = defaultdict(int)
 
     def get_multiple_formula_flag(fn):
-        return 'Y' if calculated_counts.get(fn, 0) > 1 else 'N' if fn in calculated_counts else ''
+        if fn in calculated_counts:
+            return 'Y' if calculated_counts.get(fn, 0) > 1 else 'N'
+        return ''
 
     def add_row(field_type, field_name, source_table, used_in, formula='', raw='', formula_step=''):
         nonlocal row
@@ -393,6 +414,7 @@ def append_rows(ws_detail, parsed, folder, fex_name):
 
     for f in parsed['define_fields']:
         step_counter[f['field']] += 1
+
         add_row(
             'Calculated - DEFINE',
             f['field'],
@@ -405,6 +427,7 @@ def append_rows(ws_detail, parsed, folder, fex_name):
 
     for f in parsed['compute_fields']:
         step_counter[f['field']] += 1
+
         add_row(
             'Calculated - COMPUTE',
             f['field'],
@@ -518,18 +541,35 @@ def write_sheet3(ws_sheet3, groups, group_map, unparsed):
             row += 1
 
 
-def write_sheet4(ws_sheet4, total_reports, migration_count, total_tables):
+def write_sheet4(ws_sheet4, total_reports, migration_count, unique_tables):
     setup_sheet(ws_sheet4, SHEET4_HEADERS, SHEET4_WIDTHS)
 
-    rows = [
+    total_tables = len(unique_tables)
+
+    summary_rows = [
         ('Total Number of Reports', total_reports),
         ('Total Consolidated', migration_count),
         ('Total Tables', total_tables),
     ]
 
-    for row_num, (metric, count) in enumerate(rows, start=2):
+    row_num = 2
+
+    for metric, count in summary_rows:
         _write_cell(ws_sheet4, row_num, 1, metric, 'F2F2F2', '000000', bold=True)
         _write_cell(ws_sheet4, row_num, 2, count, 'F2F2F2', '000000')
+        row_num += 1
+
+    row_num += 2
+
+    _write_cell(ws_sheet4, row_num, 1, 'All Unique Tables Used', '1F4E79', 'FFFFFF', bold=True)
+    _write_cell(ws_sheet4, row_num, 2, 'Table Name', '1F4E79', 'FFFFFF', bold=True)
+
+    row_num += 1
+
+    for idx, table_name in enumerate(sorted(unique_tables), start=1):
+        _write_cell(ws_sheet4, row_num, 1, idx, 'FFFFFF', '000000')
+        _write_cell(ws_sheet4, row_num, 2, table_name, 'FFFFFF', '000000')
+        row_num += 1
 
 
 def read_uploaded_fex(uploaded_file):
@@ -597,6 +637,7 @@ def build_output_workbook(template_bytes, fex_items):
 
     errors = []
     total = len(fex_items)
+
     progress = st.progress(0)
     status = st.empty()
 
@@ -645,14 +686,16 @@ def build_output_workbook(template_bytes, fex_items):
 
     migration_count = dup_group_count + unique_count + unparsed_count
 
-    total_tables = len({
+    unique_tables = {
         table.upper()
         for _, _, parsed in parsed_results
         if parsed is not None
         for table in parsed['real_sources']
-    })
+    }
 
-    write_sheet4(ws_sheet4, len(fex_items), migration_count, total_tables)
+    total_tables = len(unique_tables)
+
+    write_sheet4(ws_sheet4, len(fex_items), migration_count, unique_tables)
 
     progress.progress(1.0)
 
@@ -712,8 +755,9 @@ with st.expander("How duplicate grouping works", expanded=False):
 
         **Sheet4** shows the summary report:
         - Total Number of Reports
-        - Total Consolidated
-        - Total Tables
+        - Total Consolidated after duplicate elimination
+        - Total unique source tables
+        - Full list of all unique source tables used
         """
     )
 
