@@ -147,7 +147,7 @@ def extract_program_tokens_from_text(value):
 
     if not tokens:
         cleaned = normalize_program_name(text)
-        if cleaned and len(cleaned) >= 3:
+        if cleaned:
             tokens.add(cleaned)
 
     return tokens
@@ -163,31 +163,16 @@ def read_resource_analyzer_file(uploaded_ra_file):
     else:
         df_map = pd.read_excel(uploaded_ra_file, sheet_name=None, dtype=str)
 
-    preferred_header_terms = [
-        'program',
-        'procedure',
-        'report',
-        'fex',
-        'focexec',
-        'app',
-        'name',
-        'object',
-    ]
-
     for sheet_name, df in df_map.items():
         if df is None or df.empty:
             continue
 
         df = df.fillna('')
 
-        preferred_columns = []
+        columns_to_scan = list(df.columns)
 
-        for col in df.columns:
-            col_text = str(col).strip().lower()
-            if any(term in col_text for term in preferred_header_terms):
-                preferred_columns.append(col)
-
-        columns_to_scan = preferred_columns if preferred_columns else list(df.columns)
+        st.write(f"Sheet scanned: {sheet_name}")
+        st.write("Columns found:", df.columns.tolist())
 
         for col in columns_to_scan:
             for value in df[col].astype(str).tolist():
@@ -204,12 +189,20 @@ def filter_fex_items_by_resource_analyzer(fex_items, allowed_program_names):
     matched_items = []
     matched_pairs = []
 
+    allowed_clean = set()
+
+    for item in allowed_program_names:
+        item_clean = normalize_program_name(item)
+        allowed_clean.add(item_clean)
+        allowed_clean.add(item_clean.replace('.FEX', ''))
+
     for folder, fex_name, content in fex_items:
         normalized_fex = normalize_program_name(fex_name)
+        normalized_without_ext = normalized_fex.replace('.FEX', '')
 
-        if normalized_fex in allowed_program_names:
+        if normalized_fex in allowed_clean or normalized_without_ext in allowed_clean:
             matched_items.append((folder, fex_name, content))
-            matched_pairs.append((normalized_fex, fex_name))
+            matched_pairs.append((normalized_without_ext, fex_name))
 
     return matched_items, matched_pairs
 
