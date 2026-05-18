@@ -138,7 +138,11 @@ def extract_program_tokens_from_text(value):
 
     tokens = set()
 
-    fex_matches = re.findall(r'([A-Za-z0-9_.$#/-]+\.fex)', text, flags=re.IGNORECASE)
+    fex_matches = re.findall(
+        r'([A-Za-z0-9_.$#/-]+\.fex)',
+        text,
+        flags=re.IGNORECASE
+    )
 
     for item in fex_matches:
         normalized = normalize_program_name(item)
@@ -146,9 +150,13 @@ def extract_program_tokens_from_text(value):
             tokens.add(normalized)
 
     if not tokens:
-        cleaned = normalize_program_name(text)
-        if cleaned:
-            tokens.add(cleaned)
+        possible_words = re.findall(r'\b[A-Za-z0-9_.$#-]{3,}\b', text)
+
+        for word in possible_words:
+            cleaned = normalize_program_name(word)
+
+            if cleaned and cleaned not in WF_KEYWORDS:
+                tokens.add(cleaned)
 
     return tokens
 
@@ -158,29 +166,59 @@ def read_resource_analyzer_file(uploaded_ra_file):
     program_names = set()
     raw_values = []
 
-    if file_name.endswith('.csv'):
-        df_map = {'ResourceAnalyzer': pd.read_csv(uploaded_ra_file, dtype=str)}
-    else:
-        df_map = pd.read_excel(uploaded_ra_file, sheet_name=None, dtype=str)
+    uploaded_ra_file.seek(0)
 
-    for sheet_name, df in df_map.items():
-        if df is None or df.empty:
-            continue
+    try:
+        if file_name.endswith('.csv'):
+            df_map = {
+                'ResourceAnalyzer': pd.read_csv(uploaded_ra_file, dtype=str, header=None)
+            }
+        else:
+            df_map = pd.read_excel(
+                uploaded_ra_file,
+                sheet_name=None,
+                dtype=str,
+                header=None
+            )
+    except Exception as e:
+        st.warning(f"Resource Analyzer file could not be read properly: {e}")
+        return program_names, raw_values
 
-        df = df.fillna('')
+    with st.expander("Resource Analyzer Debug Details"):
+        for sheet_name, df in df_map.items():
+            if df is None or df.empty:
+                continue
 
-        columns_to_scan = list(df.columns)
+            df = df.fillna('')
 
-        st.write(f"Sheet scanned: {sheet_name}")
-        st.write("Columns found:", df.columns.tolist())
+            st.write(f"Scanning sheet: {sheet_name}")
+            st.write(f"Rows: {df.shape[0]}, Columns: {df.shape[1]}")
 
-        for col in columns_to_scan:
-            for value in df[col].astype(str).tolist():
-                extracted = extract_program_tokens_from_text(value)
+            preview_values = []
 
-                for item in extracted:
-                    program_names.add(item)
-                    raw_values.append((str(value), item))
+            for row_index in range(df.shape[0]):
+                row_values = df.iloc[row_index].astype(str).tolist()
+
+                for value in row_values:
+                    value = str(value).strip()
+
+                    if not value or value.lower() == 'nan':
+                        continue
+
+                    preview_values.append(value)
+
+                    extracted = extract_program_tokens_from_text(value)
+
+                    for item in extracted:
+                        if item:
+                            program_names.add(item)
+                            raw_values.append((value, item))
+
+            st.write("First values found in Resource Analyzer file:")
+            st.write(preview_values[:50])
+
+        st.write("Detected Resource Analyzer program names:")
+        st.write(sorted(program_names))
 
     return program_names, raw_values
 
@@ -208,7 +246,7 @@ def filter_fex_items_by_resource_analyzer(fex_items, allowed_program_names):
 
 
 def raw_db_fields(formula, defined_names):
-    tokens = re.findall(r'\b([A-Z][A-Z0-9_]{2,})\b', formula)
+    tokens = re.findall(r'\b([A-Z][A-Z0-9_]{2,})\b', formula.upper())
 
     return sorted({
         t for t in tokens
@@ -330,7 +368,7 @@ def parse_fex(fex_text):
                 'source': def_src,
             })
 
-    defined_names = {f['field'] for f in result['define_fields']}
+    defined_names = {f['field'].upper() for f in result['define_fields']}
     raw_set = set()
 
     for f in result['define_fields']:
@@ -388,7 +426,7 @@ def parse_fex(fex_text):
                 if fn.upper() in ('BY', 'WHERE', 'ON', 'SUM', 'PRINT', 'END', 'COMPUTE'):
                     continue
 
-                if fn in defined_names:
+                if fn.upper() in defined_names:
                     result['sum_calc'].append({'field': fn, 'source': tbl_src})
                 else:
                     result['sum_real'].append({'field': fn, 'source': tbl_src})
@@ -400,7 +438,7 @@ def parse_fex(fex_text):
             if fn.upper() in ('TABLE', 'ON', 'END'):
                 continue
 
-            if fn in defined_names:
+            if fn.upper() in defined_names:
                 result['by_calc'].append({'field': fn, 'source': tbl_src})
             else:
                 result['by_real'].append({'field': fn, 'source': tbl_src})
@@ -705,6 +743,8 @@ def read_uploaded_fex(uploaded_file):
 def collect_fex_from_zip(uploaded_zip):
     files = []
 
+    uploaded_zip.seek(0)
+
     with zipfile.ZipFile(uploaded_zip, 'r') as zf:
         for name in zf.namelist():
             if name.lower().endswith('.fex'):
@@ -748,7 +788,7 @@ def build_output_workbook(fex_items, allowed_program_names, matched_pairs):
     progress = st.progress(0)
     status = st.empty()
 
-    status.text("Pass 1 of 2: Parsing Resource Analyzer selected FEX files...")
+    status.text("Pass 1 of 2: Parsing selected FEX files...")
 
     parsed_results = []
     fex_fingerprints = []
@@ -779,7 +819,7 @@ def build_output_workbook(fex_items, allowed_program_names, matched_pairs):
         try:
             append_rows(ws_detail, parsed, folder, fex_name)
         except Exception as e:
-            errors.append(f"{fex_name} (write): {e}")
+            errors.append(f"{fex_name} write error: {e}")
 
         progress.progress(0.45 + idx / total * 0.45 if total else 1.0)
 
@@ -787,7 +827,6 @@ def build_output_workbook(fex_items, allowed_program_names, matched_pairs):
     write_sheet3(ws_sheet3, groups, group_map, unparsed)
 
     dup_group_count = sum(1 for m in groups.values() if len(m) > 1)
-    dup_fex_count = sum(len(m) for m in groups.values() if len(m) > 1)
     unique_count = sum(1 for m in groups.values() if len(m) == 1)
     unparsed_count = len(unparsed)
 
@@ -822,7 +861,6 @@ def build_output_workbook(fex_items, allowed_program_names, matched_pairs):
         output,
         errors,
         dup_group_count,
-        dup_fex_count,
         unique_count,
         unparsed_count,
         migration_count,
@@ -862,10 +900,6 @@ if st.button("Run Mapping", type="primary"):
 
         allowed_program_names, raw_ra_values = read_resource_analyzer_file(resource_analyzer_file)
 
-        if not allowed_program_names:
-            st.error("No program/report/FEX names could be detected from the Resource Analyzer file.")
-            st.stop()
-
         if mode == "Multiple FEX Files":
             if not uploaded_fex_files:
                 st.error("Please upload at least one .fex file.")
@@ -887,20 +921,47 @@ if st.button("Run Mapping", type="primary"):
                 st.error("No .fex files found inside the ZIP.")
                 st.stop()
 
-        selected_fex_items, matched_pairs = filter_fex_items_by_resource_analyzer(
-            all_fex_items,
-            allowed_program_names
-        )
+        if allowed_program_names:
+            selected_fex_items, matched_pairs = filter_fex_items_by_resource_analyzer(
+                all_fex_items,
+                allowed_program_names
+            )
 
-        if not selected_fex_items:
-            st.error("No matching FEX files were found from the Resource Analyzer list.")
-            st.stop()
+            if not selected_fex_items:
+                st.warning(
+                    "Resource Analyzer names were detected, but none matched the uploaded FEX files. "
+                    "So the app will process all FEX files from the ZIP instead."
+                )
+
+                selected_fex_items = all_fex_items
+                allowed_program_names = {
+                    normalize_program_name(fex_name)
+                    for _, fex_name, _ in all_fex_items
+                }
+                matched_pairs = [
+                    (normalize_program_name(fex_name), fex_name)
+                    for _, fex_name, _ in all_fex_items
+                ]
+        else:
+            st.warning(
+                "No program/report/FEX names could be detected from the Resource Analyzer file. "
+                "So the app will process all FEX files from the ZIP instead."
+            )
+
+            selected_fex_items = all_fex_items
+            allowed_program_names = {
+                normalize_program_name(fex_name)
+                for _, fex_name, _ in all_fex_items
+            }
+            matched_pairs = [
+                (normalize_program_name(fex_name), fex_name)
+                for _, fex_name, _ in all_fex_items
+            ]
 
         (
             output_stream,
             errors,
             dup_group_count,
-            dup_fex_count,
             unique_count,
             unparsed_count,
             migration_count,
@@ -912,8 +973,7 @@ if st.button("Run Mapping", type="primary"):
         )
 
         st.success(
-            f"Completed. Resource Analyzer reports detected: **{len(allowed_program_names)}**. "
-            f"Matched and processed FEX files: **{len(selected_fex_items)}**. "
+            f"Completed. Reports processed: **{len(selected_fex_items)}**. "
             f"Final consolidated count: **{migration_count}**. "
             f"Total unique source tables: **{total_tables}**."
         )
